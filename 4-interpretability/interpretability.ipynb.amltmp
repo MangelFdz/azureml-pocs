@@ -1,0 +1,222 @@
+{
+  "cells": [
+    {
+      "cell_type": "code",
+      "source": [
+        "from azureml.core import Workspace\r\n",
+        "\r\n",
+        "ws = Workspace.from_config()"
+      ],
+      "outputs": [],
+      "execution_count": 1,
+      "metadata": {
+        "gather": {
+          "logged": 1662799904647
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "%%writefile interpretability_requirements.txt\r\n",
+        "\r\n",
+        "azureml-core\r\n",
+        "scikit-learn\r\n",
+        "azureml-interpretability\r\n",
+        "azureml-dataset-runtime"
+      ],
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "Writing interpretability_requirements.txt\n"
+        }
+      ],
+      "execution_count": 2,
+      "metadata": {
+        "jupyter": {
+          "source_hidden": false,
+          "outputs_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "from azureml.core import Environment\r\n",
+        "from azureml.core.environment import CondaDependencies\r\n",
+        "myenv = Environment.from_pip_requirements(\r\n",
+        "    name='interpretability-environment', \r\n",
+        "    file_path='interpretability_requirements.txt',\r\n",
+        "    )\r\n",
+        "_ = myenv.register(ws)"
+      ],
+      "outputs": [],
+      "execution_count": 4,
+      "metadata": {
+        "jupyter": {
+          "source_hidden": false,
+          "outputs_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        },
+        "gather": {
+          "logged": 1662800269416
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "%%writefile interpretability_train.py\r\n",
+        "\r\n",
+        "import joblib\r\n",
+        "\r\n",
+        "from sklearn.datasets import load_diabetes\r\n",
+        "from sklearn.linear_model import Ridge\r\n",
+        "import sklearn\r\n",
+        "\r\n",
+        "from azureml.core import Dataset\r\n",
+        "from azureml.core.run import Run\r\n",
+        "import numpy as np\r\n",
+        "import sklearn\r\n",
+        "\r\n",
+        "from azureml.core import Model\r\n",
+        "from azureml.core.resource_configuration import ResourceConfiguration\r\n",
+        "from azureml.interpret import ExplanationClient\r\n",
+        "from interpret.ext.blackbox import TabularExplainer\r\n",
+        "from sklearn.model_selection import train_test_split\r\n",
+        "\r\n",
+        "\r\n",
+        "X, y = load_diabetes(return_X_y=True)\r\n",
+        "x_train, x_test, y_train, y_test = train_test_split(X, y)\r\n",
+        "model = Ridge().fit(x_train, y_train)\r\n",
+        "\r\n",
+        "joblib.dump(model, 'sklearn_regression_model.pkl')\r\n",
+        "\r\n",
+        "print('Model trained')\r\n",
+        "\r\n",
+        "\r\n",
+        "## Store sample input and output datasets into Azure\r\n",
+        "\r\n",
+        "np.savetxt('features.csv', x_train, delimiter=',')\r\n",
+        "np.savetxt('labels.csv', y_train, delimiter=',')\r\n",
+        "run = Run.get_context()\r\n",
+        "ws = run.experiment.workspace\r\n",
+        "datastore = ws.get_default_datastore()\r\n",
+        "datastore.upload_files(files=['./features.csv', './labels.csv'],\r\n",
+        "                       target_path='sklearn_regression/',\r\n",
+        "                       overwrite=True)\r\n",
+        "\r\n",
+        "input_dataset = Dataset.Tabular.from_delimited_files(path=[(datastore, 'sklearn_regression/features.csv')])\r\n",
+        "output_dataset = Dataset.Tabular.from_delimited_files(path=[(datastore, 'sklearn_regression/labels.csv')])\r\n",
+        "\r\n",
+        "#Interpret model\r\n",
+        "\r\n",
+        "client = ExplanationClient.from_run(run)\r\n",
+        "\r\n",
+        "\r\n",
+        "# explain predictions on your local machine\r\n",
+        "explainer = TabularExplainer(model, \r\n",
+        "                             x_train,\r\n",
+        "                            features=[\"AGE\", \"SEX\", \"BMI\", \"BP\", \"S1\", \"S2\", \"S3\", \"S4\", \"S5\", \"S6\"])\r\n",
+        "\r\n",
+        "global_explanation = explainer.explain_global(x_test)\r\n",
+        "client.upload_model_explanation(global_explanation, comment='global explanation: all features')\r\n",
+        "\r\n",
+        "## Register model\r\n",
+        "\r\n",
+        "model = Model.register(workspace=ws,\r\n",
+        "                       model_name='interpreted_model',                # Name of the registered model in your workspace.\r\n",
+        "                       model_path='./sklearn_regression_model.pkl',  # Local file to upload and register as a model.\r\n",
+        "                       model_framework=Model.Framework.SCIKITLEARN,  # Framework used to create the model.\r\n",
+        "                       model_framework_version=sklearn.__version__,  # Version of scikit-learn used to create the model.\r\n",
+        "                       sample_input_dataset=input_dataset,\r\n",
+        "                       sample_output_dataset=output_dataset,\r\n",
+        "                       resource_configuration=ResourceConfiguration(cpu=1, memory_in_gb=0.5),\r\n",
+        "                       description='Ridge regression model to predict diabetes progression.',\r\n",
+        "                       tags={'area': 'diabetes', 'type': 'regression'})\r\n",
+        "\r\n",
+        "print('Name:', model.name)\r\n",
+        "print('Version:', model.version)"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {
+        "jupyter": {
+          "source_hidden": false,
+          "outputs_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "from azureml.core import Experiment, ScriptRunConfig\r\n",
+        "\r\n",
+        "experiment = Experiment(workspace=ws, name='interpretability-experiment')\r\n",
+        "\r\n",
+        "config = ScriptRunConfig(\r\n",
+        "    source_directory='.',\r\n",
+        "    script='interpretability_train.py',\r\n",
+        "    compute_target='tutorial-ma',\r\n",
+        "    environment=myenv)\r\n",
+        "\r\n",
+        "run = experiment.submit(config)"
+      ],
+      "outputs": [],
+      "execution_count": null,
+      "metadata": {
+        "jupyter": {
+          "source_hidden": false,
+          "outputs_hidden": false
+        },
+        "nteract": {
+          "transient": {
+            "deleting": false
+          }
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "name": "python38-azureml",
+      "language": "python",
+      "display_name": "Python 3.8 - AzureML"
+    },
+    "language_info": {
+      "name": "python",
+      "version": "3.8.5",
+      "mimetype": "text/x-python",
+      "codemirror_mode": {
+        "name": "ipython",
+        "version": 3
+      },
+      "pygments_lexer": "ipython3",
+      "nbconvert_exporter": "python",
+      "file_extension": ".py"
+    },
+    "kernel_info": {
+      "name": "python38-azureml"
+    },
+    "nteract": {
+      "version": "nteract-front-end@1.0.0"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 2
+}
